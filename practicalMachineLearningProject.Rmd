@@ -1,0 +1,145 @@
+---
+title: "Coursera Practical Machine Learning Project"
+author: "Donovan Quimby"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, cache=TRUE)
+```
+
+![](PredictionMachineLearning.jpg)
+
+## Background {#br}
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har >(see the section on the Weight Lifting Exercise Dataset).
+
+
+## Loading and Preparing the data
+
+The first steps in this study are to load the required libraries and data for this project. The source of the data is found at the link in the _Background_ section above. There is a training dataset consisting of 19622 observations of 158 features and a single response variable named `classe`. Also, a testing set is provided, which consists of 20 observations of the same 158 features, but no response. The testing set contains an additional column which is a key to correspond to each question in a quiz consisting of answers derived from the model selected in this analysis. The `test` data is renamed `quiz` from this point forward to avoid confusion when using a seperate test set for model validation.   
+
+```{r libraries}
+#load all libraries required for script
+library(tidyverse)
+library(caret)
+library(doParallel)
+library(parallel)
+```
+
+```{r load data}
+#load Data sets
+rawTrain <- read_delim('pml-training.csv', delim = ',') %>% select(- X1)
+rawQuiz <-  read_delim('pml-testing.csv', delim = ',') %>% select(- X1)
+```
+
+There are many columns which contain a significant number of `NA` values. For the sake of simplicity, any column containing an `NA` value is removed in both the training and quiz datasets. Although this may not be ideal, there is still a large number of features which can be used to build the predictive models. After removing the `NA` columns, 50 features remain. In addition, the features `time`, `user`, and `window` are removed because they are highly correlated with the result in the training data, but have no value as predictive features for future data.
+
+
+```{r removeNA}
+# remove columns that contain any NA values    
+training <- rawTrain[ , !apply(is.na(rawTrain), 2, any)] %>%
+        select(-contains('time'), -contains('user'), -contains('window')) 
+
+quiz <- rawQuiz[ , !apply(is.na(rawQuiz), 2, any)]%>%
+        select(-contains('time'), -contains('user'), -contains('window'))
+
+training$classe <- as.factor(training$classe)
+
+```
+
+## Split Data and Parallelize Processes
+
+The training data is split into 2 data sets, `train`, which is for training the model and `validation`, which is used for selecting the best performing model.  70% of the data is randomly partitioned into `train` and the remaining 30% is used for the `validation` dataset.
+
+
+```{r validationSet}
+set.seed(123)
+inTrain <- createDataPartition(y = training$classe, p = .70,list = FALSE)
+train <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+The `doParallel` package is used to take advantage of multiple processors to facilitate faster model run times. It is important to note that the cluster usage must be stopped after the models are finished.
+
+```{r parallel}
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+## Create and Evaluate Models
+
+Four classification models from the `caret` package are created and compared to choose the best one. A k-nearest neighbor (knn), standard random forest (rf), a fast implementation of the random forest for high dimensional data (ranger), and a linear extreme boosting method (xgboost) were trained to find their ideal hyperparameters. The data is centered and scaled for each model, and fivefold cross-validation is used for estimating the model's accuracy. 
+
+```{r models}
+
+# create models
+trctrl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+#KNN classification model
+set.seed(123)
+modelKnn <- train(classe ~. , data=train, method='knn', preProcess = c("center", "scale"), trControl = trctrl)
+
+# Random Forest classification model
+set.seed(123)
+modelRF <- train(classe ~. , data=train, method='rf', preProcess = c("center", "scale"), trControl = trctrl)
+
+# Ranger
+set.seed(123)
+modelRanger <- train(classe ~. , data=train, method='ranger', preProcess = c("center", "scale"), trControl = trctrl)
+
+#xgboost classification model
+set.seed(123)
+modelXgboost <- train(classe ~. , data=train, method='xgbTree', preProcess = c("center", "scale"), trControl = trctrl)
+
+# end parallel processing
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+The `resamples` function is used to extract the mean estimated accuracy of the models for predicting the training data. The mean estimated accuracy is the mean of all 5 folds from the cross-validation process.
+
+```{r cvAccuracy}
+#USe resamples to extract model accuracies
+resamps <- resamples(list(knn = modelKnn, rf = modelRF, ranger = modelRanger,
+                          XgBoost = modelXgboost))
+TrainAccuracy <- summary(resamps$values[c(2,4,6,8)])[3,]
+#display Accuracy
+TrainAccuracy
+```
+
+
+As shown above, all the models perform reasonably. The worst performing model, KNN, has a training accuracy of 95.12%, while the ranger model and xgboost model have accuracies of 99.31 and 99.38, respectively. The training error gives us an idea of how the models are performing, but should not be used to select the model. For model selection, each model's performance is evaluated using the `validation` data set.
+
+```{r predictions}
+# make predictions using validation data set
+predKNN <- predict(modelKnn, validation)
+predRF <- predict(modelRF, validation)
+predRanger <- predict(modelRanger, validation)
+predXgboost <- predict(modelXgboost, validation)
+```
+
+```{r confMat}
+# create confusion matrix
+cmKNN <- confusionMatrix(predKNN, validation$classe)
+cmRF <- confusionMatrix(predRF, validation$classe)
+cmRanger <- confusionMatrix(predRanger, validation$classe)
+cmXg <- confusionMatrix(predXgboost, validation$classe)
+
+# display model accuracies
+valAccuracy <- tibble(knn = cmKNN$overall[[1]], RF = cmRF$overall[[1]],
+                         ranger = cmRanger$overall[[1]], Xgboost = cmXg$overall[[1]])
+valAccuracy
+```
+
+The best model when using the `validation` datset is the ranger random forest model with an accuracy of `r round(valAccuracy$ranger,4)`, althought the xgboost model displays a nearly identical accuracy of `r round(valAccuracy$Xgboost,4)`. The order of the results are in contrast to the training error reported previously, which highlights the importance of evaluating the model on a separate dataset from the one used for training.
+
+Considering how close the accuracy of the ranger and xgboost model performed, both would be good candidates for a final model. However, the ranger model took `r round(modelRanger$times$everything[[3]],0)` seconds to run while the xgboost required `r round(modelXgboost$times$everything[[3]],1)` seconds on the same computer. The xgboost model required 39.2% greater runtime when compared to the ranger model. As a result, the ranger model was chosen as the best performing model and is used for predicting the classification of the quiz dataset. The ranger model resulted in a score of 100% on the quiz.
+
+```{r quizPredict}
+
+quizPredictions <- predict(modelRanger, rawQuiz)
+quizPredictions
+```
+
